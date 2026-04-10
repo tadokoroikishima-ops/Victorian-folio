@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Victoria Folio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,700;1,400;1,500&family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400;1,600&family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,300;1,400&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+<div class="vignette"></div>
+
+<!-- LOGIN -->
+
+<div id="login-screen">
+  <div class="login-inner">
+    <div class="login-crest">— ✦ —</div>
+    <h1 class="login-title">Victoria Folio</h1>
+    <div class="login-rule"></div>
+    <p class="login-sub">Private Archive &nbsp;·&nbsp; By Invitation</p>
+    <input class="login-input" type="password" id="pass-input" placeholder="passphrase" autocomplete="off"/>
+    <button class="login-btn" id="login-btn">Enter</button>
+    <div class="login-err" id="login-err"></div>
+  </div>
+</div>
+
+<!-- APP -->
+
+<div id="app">
+
+  <header class="site-header">
+    <div class="header-inner">
+      <span class="header-eyebrow">Victoria Folio &nbsp;·&nbsp; Private Collection</span>
+      <h1 class="header-title">Jane Willow</h1>
+      <p class="header-attribution">A personal archive assembled by a friend &nbsp;—&nbsp; press, periodicals &amp; ephemera</p>
+    </div>
+  </header>
+
+  <div class="config-bar">
+    <div class="config-inner">
+      <span class="config-label">Repository:</span>
+      <input class="config-input" type="text" id="repo-input" placeholder="owner/repository  or  owner/repository/folder"/>
+      <button class="config-btn" id="load-btn">Load Collection</button>
+      <span class="status-msg" id="status-msg"></span>
+      <span class="config-hint">Filename: <code>Publication_Name_001.jpg</code> &nbsp;·&nbsp; Files sharing the same title group as pages automatically</span>
+    </div>
+  </div>
+
+  <div class="search-bar">
+    <div class="search-inner">
+      <div class="search-field">
+        <span class="search-icon">⊛</span>
+        <input type="text" id="search-input" placeholder="Search the collection…"/>
+      </div>
+      <span class="item-count" id="item-count"></span>
+    </div>
+  </div>
+
+  <main class="vault-main">
+    <div id="shelf-container"></div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-rule"></div>
+    <p class="footer-text">Victoria Folio &nbsp;·&nbsp; All materials presented for personal reference</p>
+  </footer>
+
+</div>
+
+<!-- VIEWER -->
+
+<div id="viewer-overlay">
+  <div class="viewer-box">
+    <div class="clipping-frame" id="clipping-frame">
+      <img class="viewer-img" id="viewer-img" alt=""/>
+      <div class="viewer-nav left" id="nav-prev">
+        <div class="nav-arrow">‹</div>
+      </div>
+      <div class="viewer-nav right" id="nav-next">
+        <div class="nav-arrow">›</div>
+      </div>
+    </div>
+    <div class="viewer-footer">
+      <span class="viewer-title" id="viewer-title"></span>
+      <span class="viewer-pager" id="viewer-pager"></span>
+      <button class="viewer-close" id="viewer-close">✕</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ─── CONSTANTS ─── */
+const PASSWORD    = 'hillock7';
+const STORAGE_KEY = 'vf_repo';
+const PER_SHELF   = 10;
+
+/* ─── LOGIN ─── */
+const loginScreen = document.getElementById('login-screen');
+const passInput   = document.getElementById('pass-input');
+const loginErr    = document.getElementById('login-err');
+const app         = document.getElementById('app');
+
+function attemptLogin() {
+  if (passInput.value === PASSWORD) {
+    loginScreen.classList.add('fade-out');
+    app.classList.add('visible');
+    setTimeout(() => loginScreen.remove(), 1100);
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      document.getElementById('repo-input').value = saved;
+      loadFromGitHub(saved);
+    } else {
+      renderEmptyShelves();
+    }
+  } else {
+    loginErr.textContent = '— Incorrect passphrase —';
+    passInput.value = '';
+    passInput.focus();
+    setTimeout(() => loginErr.textContent = '', 3000);
+  }
+}
+
+document.getElementById('login-btn').addEventListener('click', attemptLogin);
+passInput.addEventListener('keydown', e => { if (e.key === 'Enter') attemptLogin(); });
+
+/* ─── FILENAME PARSER ───
+   Groups pages by shared base title.
+   Strips trailing _001 / -01 / _1 suffixes.
+   Returns { title, pageNum }
+*/
+function parseFilename(filename) {
+  const base = filename.replace(/\.(jpe?g|png|gif|webp)$/i, '');
+  const pageMatch = base.match(/[_\-](\d{1,4})$/);
+  const pageNum   = pageMatch ? parseInt(pageMatch[1], 10) : 1;
+  const stem      = pageMatch ? base.slice(0, base.length - pageMatch[0].length) : base;
+  const title = stem
+    .replace(/[_\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, c => c.toUpperCase());
+  return { title: title || base, pageNum };
+}
+
+/* ─── GITHUB LOADER ─── */
+let groups = [];
+
+async function loadFromGitHub(repoPath) {
+  const statusMsg = document.getElementById('status-msg');
+  const container = document.getElementById('shelf-container');
+  const clean = repoPath.trim().replace(/^\/|\/$/g, '');
+  const parts = clean.split('/');
+  if (parts.length < 2) {
+    statusMsg.textContent = 'Please enter: owner/repo or owner/repo/folder';
+    return;
+  }
+  const owner  = parts[0];
+  const repo   = parts[1];
+  const folder = parts.slice(2).join('/');
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${folder}`;
+
+  statusMsg.innerHTML = '<span class="spinner"></span> Loading…';
+  container.innerHTML = '';
+
+  try {
+    const res = await fetch(apiUrl);
+    if (!res.ok) throw new Error(`GitHub API ${res.status}`);
+    const files = await res.json();
+
+    const imgs = files.filter(f =>
+      f.type === 'file' && /\.(jpe?g|png|gif|webp)$/i.test(f.name)
+    );
+
+    if (!imgs.length) {
+      statusMsg.textContent = 'No images found at this path.';
+      renderEmptyShelves();
+      return;
+    }
+
+    // Group by title
+    const map = new Map();
+    imgs.forEach(f => {
+      const { title, pageNum } = parseFilename(f.name);
+      if (!map.has(title)) map.set(title, []);
+      map.get(title).push({ filename: f.name, rawUrl: f.download_url, pageNum });
+    });
+
+    groups = Array.from(map.entries()).map(([title, pages]) => ({
+      title,
+      pages: pages.sort((a, b) => a.pageNum - b.pageNum)
+    })).sort((a, b) => a.title.localeCompare(b.title));
+
+    localStorage.setItem(STORAGE_KEY, repoPath.trim());
+    statusMsg.textContent = '';
+    updateCount(groups.length);
+    renderShelves(groups);
+
+  } catch(err) {
+    statusMsg.textContent = `Could not load: ${err.message}`;
+    renderEmptyShelves();
+  }
+}
+
+/* ─── EMPTY SHELVES ─── */
+function renderEmptyShelves() {
+  const container = document.getElementById('shelf-container');
+  container.innerHTML = '';
+  for (let i = 0; i < 2; i++) container.appendChild(buildShelf([], true));
+  updateCount(0);
+}
+
+/* ─── RENDER SHELVES ─── */
+function renderShelves(items) {
+  const container = document.getElementById('shelf-container');
+  container.innerHTML = '';
+  if (!items.length) { renderEmptyShelves(); return; }
+  for (let i = 0; i < items.length; i += PER_SHELF)
+    container.appendChild(buildShelf(items.slice(i, i + PER_SHELF), false));
+}
+
+function buildShelf(items, isEmpty) {
+  const unit  = document.createElement('div');
+  unit.className = 'shelf-unit';
+  const board = document.createElement('div');
+  board.className = 'shelf-board';
+
+  if (isEmpty || !items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'shelf-empty';
+    empty.textContent = '— awaiting the collection —';
+    board.appendChild(empty);
+  } else {
+    const grid = document.createElement('div');
+    grid.className = 'items-grid';
+    items.forEach(g => grid.appendChild(buildCard(g)));
+    board.appendChild(grid);
+  }
+
+  const ledge = document.createElement('div');
+  ledge.className = 'shelf-ledge';
+  board.appendChild(ledge);
+  unit.appendChild(board);
+  return unit;
+}
+
+/* ─── BUILD CARD ─── */
+function buildCard(group) {
+  const card = document.createElement('div');
+  card.className = 'item-card';
+
+  const cover = document.createElement('div');
+  cover.className = 'item-cover';
+
+  const first = group.pages[0];
+  if (first && first.rawUrl) {
+    const img = document.createElement('img');
+    img.alt = group.title;
+    img.loading = 'lazy';
+    img.src = first.rawUrl;
+    img.onerror = () => { cover.innerHTML = ''; cover.appendChild(makePH(group.title)); };
+    cover.appendChild(img);
+  } else {
+    cover.appendChild(makePH(group.title));
+  }
+
+  if (group.pages.length > 1) {
+    const badge = document.createElement('div');
+    badge.className = 'page-badge';
+    badge.textContent = `${group.pages.length}p`;
+    cover.appendChild(badge);
+  }
+
+  const name = document.createElement('div');
+  name.className = 'item-name';
+  name.textContent = group.title;
+
+  card.appendChild(cover);
+  card.appendChild(name);
+  card.addEventListener('click', () => openViewer(group));
+  return card;
+}
+
+function makePH(title) {
+  const ph = document.createElement('div');
+  ph.className = 'item-placeholder';
+  ph.innerHTML = `<div class="ph-glyph">❧</div><div class="ph-name">${escHtml(title)}</div>`;
+  return ph;
+}
+
+/* ─── SEARCH ─── */
+document.getElementById('search-input').addEventListener('input', function() {
+  const q = this.value.toLowerCase().trim();
+  if (!groups.length) return;
+  const filtered = q ? groups.filter(g => g.title.toLowerCase().includes(q)) : groups;
+  updateCount(filtered.length);
+  renderShelves(filtered);
+});
+
+function updateCount(n) {
+  document.getElementById('item-count').textContent = n > 0 ? `${n} item${n !== 1 ? 's' : ''}` : '';
+}
+
+/* ─── LOAD BUTTON ─── */
+document.getElementById('load-btn').addEventListener('click', () => {
+  const val = document.getElementById('repo-input').value.trim();
+  if (val) loadFromGitHub(val);
+});
+document.getElementById('repo-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('load-btn').click();
+});
+
+/* ─── VIEWER ─── */
+let currentGroup = null;
+let currentPage  = 0;
+
+const viewerOverlay = document.getElementById('viewer-overlay');
+const viewerImg     = document.getElementById('viewer-img');
+const viewerTitle   = document.getElementById('viewer-title');
+const viewerPager   = document.getElementById('viewer-pager');
+const navPrev       = document.getElementById('nav-prev');
+const navNext       = document.getElementById('nav-next');
+
+function openViewer(group) {
+  currentGroup = group;
+  currentPage  = 0;
+  showPage(0);
+  viewerOverlay.classList.add('open');
+}
+
+function showPage(idx) {
+  if (!currentGroup) return;
+  const pages = currentGroup.pages;
+  idx = Math.max(0, Math.min(idx, pages.length - 1));
+  currentPage = idx;
+
+  viewerImg.classList.add('turning');
+  setTimeout(() => {
+    viewerImg.src = pages[idx].rawUrl || '';
+    viewerImg.alt = currentGroup.title;
+    viewerImg.classList.remove('turning');
+  }, 200);
+
+  viewerTitle.textContent = currentGroup.title;
+  viewerPager.textContent = pages.length > 1 ? `${idx + 1} / ${pages.length}` : '';
+  navPrev.classList.toggle('disabled', idx === 0);
+  navNext.classList.toggle('disabled', idx === pages.length - 1);
+}
+
+navPrev.addEventListener('click', () => { if (currentPage > 0) showPage(currentPage - 1); });
+navNext.addEventListener('click', () => {
+  if (currentGroup && currentPage < currentGroup.pages.length - 1) showPage(currentPage + 1);
+});
+
+/* ─── KEYBOARD NAV ─── */
+document.addEventListener('keydown', e => {
+  if (!viewerOverlay.classList.contains('open')) return;
+  if (e.key === 'ArrowLeft')  showPage(currentPage - 1);
+  if (e.key === 'ArrowRight') showPage(currentPage + 1);
+  if (e.key === 'Escape')     closeViewer();
+});
+
+/* ─── SWIPE ─── */
+let touchX = 0;
+viewerOverlay.addEventListener('touchstart', e => { touchX = e.touches[0].clientX; }, { passive:true });
+viewerOverlay.addEventListener('touchend', e => {
+  const dx = e.changedTouches[0].clientX - touchX;
+  if (Math.abs(dx) > 45) dx < 0 ? showPage(currentPage + 1) : showPage(currentPage - 1);
+}, { passive:true });
+
+/* ─── CLOSE ─── */
+function closeViewer() { viewerOverlay.classList.remove('open'); }
+document.getElementById('viewer-close').addEventListener('click', closeViewer);
+viewerOverlay.addEventListener('click', e => { if (e.target === viewerOverlay) closeViewer(); });
+
+/* ─── UTILS ─── */
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+</script>
+
+</body>
+</html>
